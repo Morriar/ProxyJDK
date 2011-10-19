@@ -39,6 +39,8 @@ import javax.lang.model.SourceVersion;
 import javax.tools.JavaFileObject;
 import javax.tools.JavaFileManager;
 import javax.tools.JavaFileManager.Location;
+import javax.tools.JavaFileObject.Kind;
+import javax.tools.SimpleJavaFileObject;
 import javax.tools.StandardJavaFileManager;
 
 import static javax.tools.StandardLocation.*;
@@ -1315,13 +1317,13 @@ public class ClassReader implements Completer {
             ListBuffer<CompoundAnnotationProxy> proxies =
                 new ListBuffer<CompoundAnnotationProxy>();
             for (int i = 0; i<numAttributes; i++) {
-                CompoundAnnotationProxy proxy = readCompoundAnnotation();
-                if (proxy.type.tsym == syms.proprietaryType.tsym)
+                CompoundAnnotationProxy prxy = readCompoundAnnotation();
+                if (prxy.type.tsym == syms.proprietaryType.tsym)
                     sym.flags_field |= PROPRIETARY;
                 else
-                    proxies.append(proxy);
+                    proxies.append(prxy);
                 if (majorVersion >= V51.major &&
-                    proxy.type.tsym == syms.polymorphicSignatureType.tsym) {
+                    prxy.type.tsym == syms.polymorphicSignatureType.tsym) {
                     sym.flags_field |= POLYMORPHIC_SIGNATURE;
                 }
             }
@@ -1422,9 +1424,9 @@ public class ClassReader implements Completer {
     }
 
     interface ProxyVisitor extends Attribute.Visitor {
-        void visitEnumAttributeProxy(EnumAttributeProxy proxy);
-        void visitArrayAttributeProxy(ArrayAttributeProxy proxy);
-        void visitCompoundAnnotationProxy(CompoundAnnotationProxy proxy);
+        void visitEnumAttributeProxy(EnumAttributeProxy prxy);
+        void visitArrayAttributeProxy(ArrayAttributeProxy prxy);
+        void visitCompoundAnnotationProxy(CompoundAnnotationProxy prxy);
     }
 
     static class EnumAttributeProxy extends Attribute {
@@ -1438,7 +1440,7 @@ public class ClassReader implements Completer {
         public void accept(Visitor v) { ((ProxyVisitor)v).visitEnumAttributeProxy(this); }
         @Override
         public String toString() {
-            return "/*proxy enum*/" + enumType + "." + enumerator;
+            return "/*prxy enum*/" + enumType + "." + enumerator;
         }
     }
 
@@ -1455,7 +1457,7 @@ public class ClassReader implements Completer {
         }
     }
 
-    /** A temporary proxy representing a compound attribute.
+    /** A temporary prxy representing a compound attribute.
      */
     static class CompoundAnnotationProxy extends Attribute {
         final List<Pair<Name,Attribute>> values;
@@ -1470,7 +1472,7 @@ public class ClassReader implements Completer {
             StringBuilder buf = new StringBuilder();
             buf.append("@");
             buf.append(type.tsym.getQualifiedName());
-            buf.append("/*proxy*/{");
+            buf.append("/*prxy*/{");
             boolean first = true;
             for (List<Pair<Name,Attribute>> v = values;
                  v.nonEmpty(); v = v.tail) {
@@ -1486,7 +1488,7 @@ public class ClassReader implements Completer {
         }
     }
 
-    /** A temporary proxy representing a type annotation.
+    /** A temporary prxy representing a type annotation.
      */
     static class TypeAnnotationProxy {
         final CompoundAnnotationProxy compound;
@@ -1605,13 +1607,13 @@ public class ClassReader implements Completer {
             throw new AssertionError(); // shouldn't happen
         }
 
-        public void visitEnumAttributeProxy(EnumAttributeProxy proxy) {
-            // type.tsym.flatName() should == proxy.enumFlatName
-            TypeSymbol enumTypeSym = proxy.enumType.tsym;
+        public void visitEnumAttributeProxy(EnumAttributeProxy prxy) {
+            // type.tsym.flatName() should == prxy.enumFlatName
+            TypeSymbol enumTypeSym = prxy.enumType.tsym;
             VarSymbol enumerator = null;
             CompletionFailure failure = null;
             try {
-                for (Scope.Entry e = enumTypeSym.members().lookup(proxy.enumerator);
+                for (Scope.Entry e = enumTypeSym.members().lookup(prxy.enumerator);
                      e.scope != null;
                      e = e.next()) {
                     if (e.sym.kind == VAR) {
@@ -1626,32 +1628,32 @@ public class ClassReader implements Completer {
             if (enumerator == null) {
                 if (failure != null) {
                     log.warning("unknown.enum.constant.reason",
-                              currentClassFile, enumTypeSym, proxy.enumerator,
+                              currentClassFile, enumTypeSym, prxy.enumerator,
                               failure.getDiagnostic());
                 } else {
                     log.warning("unknown.enum.constant",
-                              currentClassFile, enumTypeSym, proxy.enumerator);
+                              currentClassFile, enumTypeSym, prxy.enumerator);
                 }
                 result = new Attribute.Enum(enumTypeSym.type,
-                        new VarSymbol(0, proxy.enumerator, syms.botType, enumTypeSym));
+                        new VarSymbol(0, prxy.enumerator, syms.botType, enumTypeSym));
             } else {
                 result = new Attribute.Enum(enumTypeSym.type, enumerator);
             }
         }
 
-        public void visitArrayAttributeProxy(ArrayAttributeProxy proxy) {
-            int length = proxy.values.length();
+        public void visitArrayAttributeProxy(ArrayAttributeProxy prxy) {
+            int length = prxy.values.length();
             Attribute[] ats = new Attribute[length];
             Type elemtype = types.elemtype(type);
             int i = 0;
-            for (List<Attribute> p = proxy.values; p.nonEmpty(); p = p.tail) {
+            for (List<Attribute> p = prxy.values; p.nonEmpty(); p = p.tail) {
                 ats[i++] = deproxy(elemtype, p.head);
             }
             result = new Attribute.Array(type, ats);
         }
 
-        public void visitCompoundAnnotationProxy(CompoundAnnotationProxy proxy) {
-            result = deproxyCompound(proxy);
+        public void visitCompoundAnnotationProxy(CompoundAnnotationProxy prxy) {
+            result = deproxyCompound(prxy);
         }
     }
 
@@ -2057,6 +2059,17 @@ public class ClassReader implements Completer {
         c.completer = this;
         return c;
     }
+    
+    /** Define a new proxy class given its name and owner.
+     */
+    public ClassSymbol defineProxyClass(Name name, Symbol owner) {
+        ClassSymbol c = new ClassSymbol(0, name, owner);
+        if (owner.kind == PCK)
+            Assert.checkNull(classes.get(c.flatname), c);
+        c.completer = this;
+        return c;
+    }
+
 
     /** Create a new toplevel or member class symbol with given name
      *  and owner and enter in `classes' unless already there.

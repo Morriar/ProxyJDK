@@ -187,6 +187,11 @@ public interface Tree {
         NEW_CLASS(NewClassTree.class),
 
         /**
+         * Used for instances of {@link NewProxyTree}.
+         */
+        NEW_PROXY(NewProxyTree.class),
+        
+        /**
          * Used for instances of {@link ParenthesizedTree}.
          */
         PARENTHESIZED(ParenthesizedTree.class),

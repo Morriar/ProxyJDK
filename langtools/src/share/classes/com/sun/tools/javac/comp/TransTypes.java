@@ -28,6 +28,7 @@ package com.sun.tools.javac.comp;
 import java.util.*;
 
 import javax.lang.model.element.ElementKind;
+import javax.lang.model.type.TypeKind;
 
 import com.sun.tools.javac.code.*;
 import com.sun.tools.javac.code.Symbol.*;
@@ -609,6 +610,40 @@ public class TransTypes extends TreeTranslator {
             tree.varargsElement = types.erasure(tree.varargsElement);
         tree.args = translateArgs(
             tree.args, tree.constructor.erasure(types).getParameterTypes(), tree.varargsElement);
+        tree.def = translate(tree.def, null);
+        tree.type = erasure(tree.type);
+        result = tree;
+    }
+    
+    public void visitNewProxy(JCNewProxy tree) {
+    	if(tree.clazz.type.isParameterized()) {
+        	// Replace parameter types by real types
+	        for(Symbol method : tree.clazz.type.tsym.members().getElements()) {
+				// Prepare method args list
+				ListBuffer<JCExpression> oldArgs = new ListBuffer<JCTree.JCExpression>();
+				for(Type arg: method.type.getParameterTypes()) {
+					oldArgs.add(make.Type(arg));
+				}
+				
+				// Translate args types if needed
+				if(!oldArgs.isEmpty()) {
+					List<JCExpression> nargs = translateArgs(oldArgs.toList(), tree.clazz.type.getTypeArguments(), null);
+					
+					// Restore paramter list
+					ListBuffer<Type> ntypes = new ListBuffer<Type>();
+					for(JCExpression exp: nargs) {
+						ntypes.add(exp.type);
+					}
+					method.type.asMethodType().argtypes = ntypes.toList();
+				}
+	        }
+        }
+    	
+        if (tree.encl != null)
+            tree.encl = translate(tree.encl, erasure(tree.encl.type));
+        tree.clazz = translate(tree.clazz, null);
+        if (tree.varargsElement != null)
+            tree.varargsElement = types.erasure(tree.varargsElement);
         tree.def = translate(tree.def, null);
         tree.type = erasure(tree.type);
         result = tree;

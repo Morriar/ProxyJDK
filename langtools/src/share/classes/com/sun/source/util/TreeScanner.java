@@ -277,6 +277,16 @@ public class TreeScanner<R,P> implements TreeVisitor<R,P> {
         r = scanAndReduce(node.getClassBody(), p, r);
         return r;
     }
+    
+    public R visitNewProxy(NewProxyTree node, P p) {
+    	System.out.println("TreeScanner.visitNewProxy()");
+        R r = scan(node.getEnclosingExpression(), p);
+        r = scanAndReduce(node.getIdentifier(), p, r);
+        r = scanAndReduce(node.getTypeArguments(), p, r);
+        r = scanAndReduce(node.getArguments(), p, r);
+        r = scanAndReduce(node.getClassBody(), p, r);
+        return r;
+    }
 
     public R visitNewArray(NewArrayTree node, P p) {
         R r = scan(node.getType(), p);

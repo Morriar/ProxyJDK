@@ -282,6 +282,15 @@ public class TreeTranslator extends JCTree.Visitor {
         result = tree;
     }
 
+    public void visitNewProxy(JCNewProxy tree) {
+    	System.out.println("TreeTranslator.visitNewProxy()");
+        tree.encl = translate(tree.encl);
+        tree.clazz = translate(tree.clazz);
+        tree.args = translate(tree.args);
+        tree.def = translate(tree.def);
+        result = tree;
+    }
+
     public void visitNewArray(JCNewArray tree) {
         tree.elemtype = translate(tree.elemtype);
         tree.dims = translate(tree.dims);

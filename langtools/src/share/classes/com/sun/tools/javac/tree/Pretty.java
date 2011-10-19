@@ -876,6 +876,38 @@ public class Pretty extends JCTree.Visitor {
             throw new UncheckedIOException(e);
         }
     }
+    
+    public void visitNewProxy(JCNewProxy tree) {
+    	System.out.println("Pretty.visitNewProxy()");
+        try {
+            if (tree.encl != null) {
+                printExpr(tree.encl);
+                print(".");
+            }
+            print("proxy ");
+            if (!tree.typeargs.isEmpty()) {
+                print("<");
+                printExprs(tree.typeargs);
+                print(">");
+            }
+            printExpr(tree.clazz);
+            print("(");
+            printExprs(tree.args);
+            print(")");
+            if (tree.def != null) {
+                Name enclClassNamePrev = enclClassName;
+                enclClassName =
+                        tree.def.name != null ? tree.def.name :
+                            tree.type != null && tree.type.tsym.name != tree.type.tsym.name.table.names.empty
+                                ? tree.type.tsym.name : null;
+                if ((tree.def.mods.flags & Flags.ENUM) != 0) print("/*enum*/");
+                printBlock(tree.def.defs);
+                enclClassName = enclClassNamePrev;
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
 
     public void visitNewArray(JCNewArray tree) {
         try {

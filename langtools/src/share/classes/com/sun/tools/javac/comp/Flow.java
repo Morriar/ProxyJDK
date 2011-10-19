@@ -1311,6 +1311,11 @@ public class Flow extends TreeScanner {
             caught = caughtPrev;
         }
     }
+    
+    public void visitNewProxy(JCNewProxy tree) {
+        scanExpr(tree.encl);
+        scanExprs(tree.args);
+    }
 
     public void visitNewArray(JCNewArray tree) {
         scanExprs(tree.dims);

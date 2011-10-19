@@ -25,12 +25,30 @@
 
 package com.sun.tools.javac.comp;
 
+import java.io.File;
+import java.io.IOException;
+import java.net.URISyntaxException;
 import java.util.*;
 
+import javax.lang.model.element.ElementKind;
+import javax.tools.JavaFileObject;
+
+import com.sun.org.apache.bcel.internal.generic.LoadClass;
 import com.sun.tools.javac.code.*;
+import com.sun.tools.javac.code.Symbol.CompletionFailure;
 import com.sun.tools.javac.jvm.*;
+import com.sun.tools.javac.jvm.ClassWriter.PoolOverflow;
+import com.sun.tools.javac.jvm.ClassWriter.StringOverflow;
 import com.sun.tools.javac.main.RecognizedOptions.PkgInfo;
+import com.sun.tools.javac.resources.compiler;
 import com.sun.tools.javac.tree.*;
+import com.sun.tools.javac.tree.JCTree.JCBlock;
+import com.sun.tools.javac.tree.JCTree.JCClassDecl;
+import com.sun.tools.javac.tree.JCTree.JCExpression;
+import com.sun.tools.javac.tree.JCTree.JCExpressionStatement;
+import com.sun.tools.javac.tree.JCTree.JCReturn;
+import com.sun.tools.javac.tree.JCTree.JCStatement;
+import com.sun.tools.javac.tree.JCTree.JCVariableDecl;
 import com.sun.tools.javac.util.*;
 import com.sun.tools.javac.util.JCDiagnostic.DiagnosticPosition;
 import com.sun.tools.javac.util.List;
@@ -38,8 +56,11 @@ import com.sun.tools.javac.util.List;
 import com.sun.tools.javac.code.Symbol.*;
 import com.sun.tools.javac.tree.JCTree.*;
 import com.sun.tools.javac.code.Type.*;
+import com.sun.tools.javac.file.BaseFileObject;
+import com.sun.tools.javac.file.JavacFileManager;
 
 import com.sun.tools.javac.jvm.Target;
+import com.sun.xml.internal.fastinfoset.tools.SAXEventSerializer;
 
 import static com.sun.tools.javac.code.Flags.*;
 import static com.sun.tools.javac.code.Kinds.*;
@@ -84,9 +105,11 @@ public class Lower extends TreeTranslator {
     private Types types;
     private boolean debugLower;
     private PkgInfo pkginfoOpt;
+    private Context context;
 
     protected Lower(Context context) {
         context.put(lowerKey, this);
+        this.context = context;
         names = Names.instance(context);
         log = Log.instance(context);
         syms = Symtab.instance(context);
@@ -114,6 +137,10 @@ public class Lower extends TreeTranslator {
     /** The currently enclosing class.
      */
     ClassSymbol currentClass;
+    
+    /** The currently enclosing class tree.
+     */
+    JCClassDecl currentClassTree;
 
     /** A queue of all translated classes.
      */
@@ -191,7 +218,7 @@ public class Lower extends TreeTranslator {
         }
         return def;
     }
-
+    
     /** A hash table mapping class symbols to lists of free variables.
      *  accessed by them. Only free variables of the method immediately containing
      *  a class are associated with that class.
@@ -280,6 +307,20 @@ public class Lower extends TreeTranslator {
                 outerThisStack.head != null)
                 visitSymbol(outerThisStack.head);
             super.visitNewClass(tree);
+        }
+        
+        /** If tree refers to a proxy instance creation expression
+         *  add all free variables of the freshly created proxy.
+         *  TODO AT_Proxy
+         */
+        public void visitNewProxy(JCNewProxy tree) {
+            ClassSymbol c = (ClassSymbol)tree.constructor.owner;
+            addFreeVars(c);
+            if (tree.encl == null &&
+                c.hasOuterInstance() &&
+                outerThisStack.head != null)
+                visitSymbol(outerThisStack.head);
+            super.visitNewProxy(tree);
         }
 
         /** If tree refers to a qualified this or super expression
@@ -592,6 +633,287 @@ public class Lower extends TreeTranslator {
         // Append class definition tree to owner's definitions.
         odef.defs = odef.defs.prepend(cdef);
 
+        return c;
+    }
+    
+/**************************************************************************
+ * Proxy handling
+ *************************************************************************/
+    
+    Name proxyName(Type subject) {
+        return names.fromString("Proxy" + subject.tsym.name.toString());
+    }
+    
+    Name proxyFlatName(ClassSymbol currentClassSymbol, Type subject) {
+    	String[] packgs = currentClassSymbol.packge().toString().split("\\.");
+        String root = packgs[0];
+        Name name = names.fromString("Proxy" + subject.tsym.name.toString());
+        return names.fromString(root + "." + ClassSymbol.formFlatName(name, ((ClassSymbol)subject.tsym).packge()));
+    }
+    
+    /**
+     * Build a new proxy decl and return ref to constructor 
+     * @param sType the proxy subject
+     * @return the proxy constructor symbol
+     */
+    MethodSymbol makeProxy(Type sType, String root) {
+    	System.out.println("Lower.makeProxy()");
+    	
+    	// Initialise proxy class definition
+		ClassSymbol sProxy = makeEmptyProxy(
+				Flags.PUBLIC,
+				names.fromString("Proxy" + sType.tsym.name.toString()),
+				root,
+				sType,
+				make.TypeParams(sType.getParameterTypes())
+		);
+		
+		// Build a new class decl
+		JCClassDecl cProxy = make.ClassDef(
+				make.Modifiers(sProxy.flags()), 
+				sProxy.name, 
+				make.TypeParams(sType.getParameterTypes()), 
+				null, 
+				List.<JCExpression>of(make.Type(sType)), 
+				List.<JCTree>nil());
+		cProxy.sym = sProxy;
+		cProxy.type = sProxy.type;
+		
+		// Get attribute
+		JCVariableDecl cAttr = makeProxyAttribute(sType, cProxy);
+		cProxy.defs = cProxy.defs.append(cAttr);
+		sProxy.members_field.enter(cAttr.sym);
+		
+		// Get constructor
+		JCMethodDecl cConst = makeProxyConstructor(sType, cProxy, cAttr);
+		cProxy.defs = cProxy.defs.append(cConst);
+		sProxy.members_field.enter(cConst.sym);
+		
+		// Build proxy methods
+		for(Symbol method : sType.tsym.members().getElements()) {
+			JCMethodDecl mDecl = makeProxyMethod(sType, cProxy, method, cAttr);
+			cProxy.defs = cProxy.defs.append(mDecl);
+			sProxy.members_field.enter(mDecl.sym);
+		}
+		
+		Gen gen = Gen.instance(this.context);
+		gen.genClass(this.attrEnv, cProxy);
+		
+		try {
+			//Write the proxy class file
+			sProxy.pool = cProxy.sym.pool;
+			sProxy.classfile = writer.writeClass(sProxy);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		
+		return cConst.sym;
+    }
+    
+    /**
+     * Prepare realsubject attribute :
+	 * 		"protected final Subject realSubject;"
+     * @param sType the subject type
+     * @return the attribute declaration
+     */
+    JCVariableDecl makeProxyAttribute(Type sType, JCClassDecl cProxy) {
+    	System.out.println("Lower.makeProxyAttribute()");
+    	JCVariableDecl cAttr = make.VarDef(
+				make.Modifiers(Flags.PROTECTED | Flags.FINAL), 
+				names.fromString("realSubject"), 
+				make.Type(sType), 
+				null);
+    	
+    	cAttr.sym = new VarSymbol(Flags.PROTECTED | Flags.FINAL, cAttr.name, cAttr.type, cProxy.sym);
+		cAttr.sym.type = sType;
+		cAttr.type = sType;
+		
+		return cAttr;
+    }
+    
+    /**
+     * Prepare proxy constructor 
+     * 
+     * public <init> (Subject realSubject) {
+	 * 	super();
+	 * 	this.realSubject = realSubject
+	 * }
+	 * 
+     * @param sType the subject
+     * @param cProxy the proxy class decl
+     * @param cAttr the real_subject attribute
+     * @return the proxy constructor decl
+     */
+    JCMethodDecl makeProxyConstructor(Type sType, JCClassDecl cProxy, JCVariableDecl cAttr) {
+    	System.out.println("Lower.makeProxyConstructor()");
+    	
+    	JCVariableDecl cParam = make.VarDef(make.Modifiers(Flags.FINAL), cAttr.name, make.Type(sType), null);
+		JCMethodDecl cConst = make.MethodDef(
+									make.Modifiers(Flags.PUBLIC), 
+									names.init, 
+									null, 
+									List.<JCTypeParameter>nil(),
+									List.<JCVariableDecl>of(cParam),
+									List.<JCExpression>nil(), 
+									null, 
+									null);
+		cConst.sym = new MethodSymbol(Flags.PUBLIC, cConst.name, cConst.type, cProxy.sym);
+		cConst.sym.type = new Type.MethodType(List.<Type>of(sType), syms.voidType, List.<Type>nil(), syms.methodClass);
+		cConst.type = cConst.sym.type;
+
+		cParam.sym = new VarSymbol(Flags.FINAL, cParam.name, cParam.type, cConst.sym);
+		cParam.sym.type = new Type.ClassType(Type.noType, sType.getParameterTypes(), new ClassSymbol(Flags.FINAL, cParam.name, cConst.sym));
+		cParam.type = sType;
+		
+		// Build constructor block
+		ListBuffer<JCStatement> stats = new ListBuffer<JCTree.JCStatement>();
+		
+		// Super call
+		JCIdent cSuper = make.Super(syms.objectType, cProxy.type.tsym); 
+		cSuper.sym = lookupConstructor(this.make_pos, syms.objectType, List.<Type>nil());
+		stats.append(
+				make.Exec(
+						make.Apply(null, cSuper, List.<JCExpression>nil()).setType(syms.voidType)
+						).setType(syms.voidType)
+		);
+		
+		// Assign realSubject
+		stats.append(make.Exec(
+						make.Assign(
+								make.Select(make.This(cProxy.type), cAttr.sym).setType(sType), 
+								make.Ident(cParam.sym).setType(sType)
+						).setType(sType)
+					));
+		
+		cConst.body = make.Block(0, stats.toList());
+		
+		return cConst;
+    }
+    
+    /**
+     * Prepare other methods
+	 * Each method defined in Subject are copied to proxy like 
+	 * 
+	 * <Visibility> <ReturnType> methodName(<Type> arg0, [...]) {
+	 * 	[return] realSubject.methodName(arg0, [...]);
+	 * }
+	 * 
+     * @param sType the subject type
+     * @param cProxy the proxy decl
+     * @param method the method symbol in subject class
+     * @param cAttr the real_subject attribute
+     * @return the method decl
+     */
+    JCMethodDecl makeProxyMethod(Type sType, JCClassDecl cProxy, Symbol method, JCVariableDecl cAttr) {
+    	System.out.println("Lower.makeProxyMethod()");
+    	
+    	// Init method decl 
+		JCMethodDecl mDecl = make.MethodDef(
+				make.Modifiers(Flags.PUBLIC), 
+				method.name, 
+				make.Type(method.type.getReturnType()), 
+				make.TypeParams(method.type.getTypeArguments()), 
+				null, 
+				make.Types(method.type.getThrownTypes()), 
+				null, 
+				null);
+		mDecl.sym = new MethodSymbol(Flags.PUBLIC, mDecl.name, mDecl.type, cProxy.sym);
+		mDecl.sym.type = new Type.MethodType(method.type.getParameterTypes(), method.type.getReturnType(), method.type.getThrownTypes(), syms.methodClass);
+		
+		// Build params list
+		ListBuffer<JCExpression> params = new ListBuffer<JCTree.JCExpression>();
+		mDecl.params = List.<JCVariableDecl>nil();
+		mDecl.sym.params = List.<VarSymbol>nil();
+		int i = 0;
+		for(Type tParam : method.type.getParameterTypes()) {
+			Name name = names.fromString("arg" + i);
+			
+			JCVariableDecl mParam = make.Param(name, tParam, mDecl.sym);				
+			
+			mParam.sym = new VarSymbol(tParam.tsym.flags(), name, tParam, mDecl.sym);
+			mParam.sym.type = new Type.ClassType(Type.noType, tParam.getParameterTypes(), new ClassSymbol(Flags.FINAL, name, mDecl.sym));
+			mParam.type = tParam;
+			mParam.type.tsym = tParam.tsym;
+			
+			mDecl.params = mDecl.params.append(mParam);
+			mDecl.sym.params = mDecl.sym.params.append(mParam.sym);
+
+			params.append(make.Ident(mParam).setType(mParam.type));
+			i++;
+		}
+		
+		// Build method block
+		if(method.type.getReturnType().tag == TypeTags.VOID) {
+			// Without return
+			mDecl.body = make.Block(0, List.<JCStatement>of(
+					make.Exec(makeCall(
+							make.Ident(cAttr.sym).setType(sType), 
+							mDecl.name,
+							params.toList())
+					)));
+		} else {
+			// With return
+			mDecl.body = make.Block(0, List.<JCStatement>of(
+					make.Return(makeCall(
+							make.Ident(cAttr.sym).setType(sType), 
+							mDecl.name,
+							params.toList())
+					)));
+		}
+		
+		return mDecl;
+    }
+    
+    /** Make an empty proxy class definition and enter and complete
+     *  its symbol. Return the class definition's symbol.
+     *  and create
+     *  @param flags    The class symbol's flags
+     *  @param name    The class name
+     */
+    ClassSymbol makeEmptyProxy(long flags, Name name, String root, Type implementing, List<JCTypeParameter> typarams) {
+        System.out.println("Lower.makeEmptyProxy()");
+    	
+    	// Create class symbol.
+    	ClassSymbol c = reader.defineProxyClass(name, ((ClassSymbol)implementing.tsym).packge());
+    	//System.out.println("before that");
+       //ClassSymbol c = reader.defineClass(name, owner);
+        
+       // c.flatname = chk.localClassName(c);
+        
+        // Set Proxy file location
+        c.flatname = names.fromString(root + "." + ClassSymbol.formFlatName(name, ((ClassSymbol)implementing.tsym).packge()));
+        c.fullname = names.fromString(root + "." + ClassSymbol.formFullName(name, ((ClassSymbol)implementing.tsym).packge()));
+//        c.sourcefile = owner.sourcefile;
+//        c.classfile = 
+        c.sourcefile = ((ClassSymbol)implementing.tsym).sourcefile;
+        
+        
+        c.completer = null;
+        c.members_field = new Scope(c);
+        c.flags_field = flags;
+        
+        ClassType ctype = (ClassType) c.type;
+        ctype.supertype_field = syms.objectType;
+//        ctype.supertype_field = owner.type;
+        ctype.interfaces_field = List.<Type>of(implementing);
+
+        //JCClassDecl odef = classDef(owner);
+
+        // Enter class symbol in owner scope and compiled table.
+        //enterSynthetic(odef.pos(), c, owner.members());
+        chk.compiled.put(c.flatname, c);
+
+        // Create class definition tree.
+        JCClassDecl cProxy = make.ClassDef(
+            make.Modifiers(flags), 
+            name,
+            typarams,
+            make.Type(syms.objectType), 
+            List.<JCExpression>of(make.Type(implementing)), 
+            List.<JCTree>nil());
+        cProxy.sym = c;
+        cProxy.type = c.type;
+        
         return c;
     }
 
@@ -1351,10 +1673,10 @@ public class Lower extends TreeTranslator {
         List<JCVariableDecl> defs = List.nil();
         for (List<VarSymbol> l = freevars; l.nonEmpty(); l = l.tail) {
             VarSymbol v = l.head;
-            VarSymbol proxy = new VarSymbol(
+            VarSymbol prxy = new VarSymbol(
                 flags, proxyName(v.name), v.erasure(types), owner);
-            proxies.enter(proxy);
-            JCVariableDecl vd = make.at(pos).VarDef(proxy, null);
+            proxies.enter(prxy);
+            JCVariableDecl vd = make.at(pos).VarDef(prxy, null);
             vd.vartype = access(vd.vartype);
             defs = defs.prepend(vd);
         }
@@ -1645,6 +1967,7 @@ public class Lower extends TreeTranslator {
         Symbol c = sym.owner;
         List<VarSymbol> ots = outerThisStack;
         if (ots.isEmpty()) {
+        	//TODO here
             log.error(pos, "no.encl.instance.of.type.in.scope", c);
             Assert.error();
             return makeNull();
@@ -2246,9 +2569,10 @@ public class Lower extends TreeTranslator {
         ClassSymbol currentClassPrev = currentClass;
         MethodSymbol currentMethodSymPrev = currentMethodSym;
         currentClass = tree.sym;
+        currentClassTree = tree;
         currentMethodSym = null;
         classdefs.put(currentClass, tree);
-
+        
         proxies = proxies.dup(currentClass);
         List<VarSymbol> prevOuterThisStack = outerThisStack;
 
@@ -2285,14 +2609,14 @@ public class Lower extends TreeTranslator {
             }
             seen = unseen;
         }
-
+        
         // Convert a protected modifier to public, mask static modifier.
         if ((tree.mods.flags & PROTECTED) != 0) tree.mods.flags |= PUBLIC;
         tree.mods.flags &= ClassFlags;
 
         // Convert name to flat representation, replacing '.' by '$'.
         tree.name = Convert.shortName(currentClass.flatName());
-
+        
         // Add this$n and free variables proxy definitions to class.
         for (List<JCVariableDecl> l = fvdefs; l.nonEmpty(); l = l.tail) {
             tree.defs = tree.defs.prepend(l.head);
@@ -2315,7 +2639,7 @@ public class Lower extends TreeTranslator {
         // Return empty block {} as a placeholder for an inner class.
         result = make_at(tree.pos()).Block(0, List.<JCStatement>nil());
     }
-
+    
     /** Translate an enum class. */
     private void visitEnumDef(JCClassDecl tree) {
         make_at(tree.pos());
@@ -2683,7 +3007,45 @@ public class Lower extends TreeTranslator {
         }
         result = tree;
     }
-
+    
+    /** TODO AT_Proxy */
+    public void visitNewProxy(JCNewProxy tree) {
+    	System.out.println("Lower.visitNewProxyNEW()");
+    	
+    	// The proxy subject type
+		Type sType = tree.clazz.type;
+		
+		// Build the proxy fullname
+		Name proxyFlatName = proxyFlatName(currentClass, sType);
+		
+		// Lookup for proxy class
+		MethodSymbol sConst;
+		try {
+			Symbol sProxy = reader.loadClass(proxyFlatName);
+		
+			// Get proxy constructor
+			sConst = (MethodSymbol)sProxy.members().lookup(names.init).sym;
+			System.out.println("\t[proxy] Loading proxy class '" + proxyFlatName + "' for interface '" + sType + "'") ;
+		} catch (Exception e) {
+			// Build a new proxy
+			
+			String[] packgs = currentClass.packge().toString().split("\\.");
+	        String root = packgs[0];
+			
+			sConst = makeProxy(sType, root);
+			System.out.println("\t[proxy] No proxy class file found for interface '" + sType + "', new one generated in " + proxyFlatName);
+		}
+		
+		// Define constructor call
+		tree.constructor = sConst;
+		tree.constructor.type = new Type.MethodType(List.<Type>of(sType), syms.voidType, List.<Type>nil(), syms.methodClass);
+		tree.constructorType = tree.constructor.type;
+		
+    	result = make.Create(sConst, tree.args);
+		
+    	visitNewClass((JCNewClass)result);
+    }
+    
     // Simplify conditionals with known constant controlling expressions.
     // This allows us to avoid generating supporting declarations for
     // the dead code, which will not be eliminated during code generation.

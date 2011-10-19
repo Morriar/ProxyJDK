@@ -644,7 +644,7 @@ public class MemberEnter extends JCTree.Visitor implements Completer {
         tree.sym = v;
         if (tree.init != null) {
             v.flags_field |= HASINIT;
-            if ((v.flags_field & FINAL) != 0 && tree.init.getTag() != JCTree.NEWCLASS) {
+            if ((v.flags_field & FINAL) != 0 && (tree.init.getTag() != JCTree.NEWCLASS || tree.init.getTag() != JCTree.NEWPROXY)) {
                 Env<AttrContext> initEnv = getInitEnv(tree, env);
                 initEnv.info.enclVar = v;
                 v.setLazyConstValue(initEnv(tree, initEnv), attr, tree.init);

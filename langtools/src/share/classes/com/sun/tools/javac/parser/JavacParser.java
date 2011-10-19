@@ -824,10 +824,11 @@ public class JavacParser implements Parser {
      *                 | [TypeArguments] THIS [Arguments]
      *                 | [TypeArguments] SUPER SuperSuffix
      *                 | NEW [TypeArguments] Creator
+     *                 | PROXY [TypeArguments] Creator
      *                 | Ident { "." Ident }
      *                   [ "[" ( "]" BracketsOpt "." CLASS | Expression "]" )
      *                   | Arguments
-     *                   | "." ( CLASS | THIS | [TypeArguments] SUPER Arguments | NEW [TypeArguments] InnerCreator )
+     *                   | "." ( CLASS | THIS | [TypeArguments] SUPER Arguments | NEW [TypeArguments] InnerCreator  | PROXY [TypeArguments] InnerCreator)
      *                   ]
      *                 | BasicType BracketsOpt "." CLASS
      *  PrefixOp       = "++" | "--" | "!" | "~" | "+" | "-"
@@ -928,7 +929,7 @@ public class JavacParser implements Parser {
                     case INTLITERAL: case LONGLITERAL: case FLOATLITERAL:
                     case DOUBLELITERAL: case CHARLITERAL: case STRINGLITERAL:
                     case TRUE: case FALSE: case NULL:
-                    case NEW: case IDENTIFIER: case ASSERT: case ENUM:
+                    case NEW: case PROXY: case IDENTIFIER: case ASSERT: case ENUM:
                     case BYTE: case SHORT: case CHAR: case INT:
                     case LONG: case FLOAT: case DOUBLE: case BOOLEAN: case VOID:
                         JCExpression t1 = term3();
@@ -976,6 +977,16 @@ public class JavacParser implements Parser {
                 typeArgs = null;
             } else return illegal();
             break;
+        case PROXY:
+        	if (typeArgs != null) return illegal();
+            if ((mode & EXPR) != 0) {
+                mode = EXPR;
+                S.nextToken();
+                if (S.token() == LT) typeArgs = typeArguments(false);
+                t = proxyCreator(pos, typeArgs);
+                typeArgs = null;
+            } else return illegal();
+        	break;
         case IDENTIFIER: case ASSERT: case ENUM:
             if (typeArgs != null) return illegal();
             t = toP(F.at(S.pos()).Ident(ident()));
@@ -1031,7 +1042,7 @@ public class JavacParser implements Parser {
                             t = superSuffix(typeArgs, t);
                             typeArgs = null;
                             break loop;
-                        case NEW:
+                        case NEW: case PROXY:
                             if (typeArgs != null) return illegal();
                             mode = EXPR;
                             int pos1 = S.pos();
@@ -1111,7 +1122,7 @@ public class JavacParser implements Parser {
                     S.nextToken();
                     t = arguments(typeArgs, t);
                     typeArgs = null;
-                } else if (S.token() == NEW && (mode & EXPR) != 0) {
+                } else if ((S.token() == NEW || S.token() == PROXY) && (mode & EXPR) != 0) {
                     if (typeArgs != null) return illegal();
                     mode = EXPR;
                     int pos2 = S.pos();
@@ -1419,6 +1430,58 @@ public class JavacParser implements Parser {
             return toP(F.at(newpos).Erroneous(List.<JCTree>of(t)));
         }
     }
+    
+    /** ProxyCreator, dedicated to proxy creation
+     */
+    JCExpression proxyCreator(int newpos, List<JCExpression> typeArgs) {
+        JCExpression t = qualident();
+        int oldmode = mode;
+        mode = TYPE;
+        boolean diamondFound = false;
+        if (S.token() == LT) {
+            checkGenerics();
+            t = typeArguments(t, true);
+            diamondFound = (mode & DIAMOND) != 0;
+        }
+        while (S.token() == DOT) {
+            if (diamondFound) {
+                //cannot select after a diamond
+                illegal(S.pos());
+            }
+            int pos = S.pos();
+            S.nextToken();
+            t = toP(F.at(pos).Select(t, ident()));
+            if (S.token() == LT) {
+                checkGenerics();
+                t = typeArguments(t, true);
+                diamondFound = (mode & DIAMOND) != 0;
+            }
+        }
+        mode = oldmode;
+        if (S.token() == LBRACKET) {
+            JCExpression e = arrayCreatorRest(newpos, t);
+            if (typeArgs != null) {
+                int pos = newpos;
+                if (!typeArgs.isEmpty() && typeArgs.head.pos != Position.NOPOS) {
+                    // note: this should always happen but we should
+                    // not rely on this as the parser is continuously
+                    // modified to improve error recovery.
+                    pos = typeArgs.head.pos;
+                }
+                setErrorEndPos(S.prevEndPos());
+                reportSyntaxError(pos, "cannot.create.array.with.type.arguments");
+                return toP(F.at(newpos).Erroneous(typeArgs.prepend(e)));
+            }
+            return e;
+        } else if (S.token() == LPAREN) {
+            return proxyCreatorRest(newpos, null, typeArgs, t);
+        } else {
+            reportSyntaxError(S.pos(), "expected2",
+                               LPAREN, LBRACKET);
+            t = toP(F.at(newpos).NewClass(null, typeArgs, t, List.<JCExpression>nil(), null));
+            return toP(F.at(newpos).Erroneous(List.<JCTree>of(t)));
+        }
+    }
 
     /** InnerCreator = Ident [TypeArguments] ClassCreatorRest
      */
@@ -1480,6 +1543,24 @@ public class JavacParser implements Parser {
             body = toP(F.at(pos).AnonymousClassDef(mods, defs));
         }
         return toP(F.at(newpos).NewClass(encl, typeArgs, t, args, body));
+    }
+    
+    /** ProxyCreatorRest = Arguments [ClassBody]
+     */
+    JCNewProxy proxyCreatorRest(int newpos,
+                                  JCExpression encl,
+                                  List<JCExpression> typeArgs,
+                                  JCExpression t)
+    {
+        List<JCExpression> args = arguments();
+        JCClassDecl body = null;
+        if (S.token() == LBRACE) {
+            int pos = S.pos();
+            List<JCTree> defs = classOrInterfaceBody(names.empty, false);
+            JCModifiers mods = F.at(Position.NOPOS).Modifiers(0);
+            body = toP(F.at(pos).AnonymousClassDef(mods, defs));
+        }
+        return toP(F.at(newpos).NewProxy(encl, typeArgs, t, args, body));
     }
 
     /** ArrayInitializer = "{" [VariableInitializer {"," VariableInitializer}] [","] "}"
@@ -2369,7 +2450,17 @@ public class JavacParser implements Parser {
         JCExpression extending = null;
         if (S.token() == EXTENDS) {
             S.nextToken();
-            extending = parseType();
+            
+            if(S.token() == PROXY) {
+            	// Skip current token
+            	S.nextToken();
+            	
+            	// Assign as proxy
+            	extending = parseType();
+            	extending.isProxy = true;
+            } else {
+                extending = parseType();
+            }
         }
         List<JCExpression> implementing = List.nil();
         if (S.token() == IMPLEMENTS) {
@@ -2790,7 +2881,7 @@ public class JavacParser implements Parser {
         case JCTree.SL_ASG: case JCTree.SR_ASG: case JCTree.USR_ASG:
         case JCTree.PLUS_ASG: case JCTree.MINUS_ASG:
         case JCTree.MUL_ASG: case JCTree.DIV_ASG: case JCTree.MOD_ASG:
-        case JCTree.APPLY: case JCTree.NEWCLASS:
+        case JCTree.APPLY: case JCTree.NEWCLASS: case JCTree.NEWPROXY:
         case JCTree.ERRONEOUS:
             return t;
         default:

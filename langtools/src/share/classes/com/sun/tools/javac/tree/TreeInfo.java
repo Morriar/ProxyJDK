@@ -317,6 +317,12 @@ public class TreeInfo {
                 return getStartPos(node.encl);
             break;
         }
+        case(JCTree.NEWPROXY): {
+            JCNewProxy node = (JCNewProxy)tree;
+            if (node.encl != null)
+                return getStartPos(node.encl);
+            break;
+        }
         case(JCTree.VARDEF): {
             JCVariableDecl node = (JCVariableDecl)tree;
             if (node.mods.pos != Position.NOPOS) {

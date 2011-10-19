@@ -327,6 +327,10 @@ public abstract class JCTree implements Tree, Cloneable, DiagnosticPosition {
      */
     public static final int ASGOffset = BITOR_ASG - BITOR;
 
+    /** Class instance creation expressions, of type NewProxy.
+     */
+    public static final int NEWPROXY = LETEXPR + 1;
+
     /* The (encoded) position in the source file. @see util.Position.
      */
     public int pos;
@@ -541,6 +545,9 @@ public abstract class JCTree implements Tree, Cloneable, DiagnosticPosition {
     }
 
     public static abstract class JCExpression extends JCTree implements ExpressionTree {
+    	
+    	public boolean isProxy = false;
+    	
         @Override
         public JCExpression setType(Type type) {
             super.setType(type);
@@ -1392,6 +1399,56 @@ public abstract class JCTree implements Tree, Cloneable, DiagnosticPosition {
             return NEWCLASS;
         }
     }
+    
+    /**
+     * A proxy(...) operation.
+     */
+    public static class JCNewProxy extends JCExpression implements NewProxyTree {
+        public JCExpression encl;
+        public List<JCExpression> typeargs;
+        public JCExpression clazz;
+        public List<JCExpression> args;
+        public JCClassDecl def;
+        public Symbol constructor;
+        public Type varargsElement;
+        public Type constructorType;
+        protected JCNewProxy(JCExpression encl,
+                           List<JCExpression> typeargs,
+                           JCExpression clazz,
+                           List<JCExpression> args,
+                           JCClassDecl def)
+        {
+            this.encl = encl;
+            this.typeargs = (typeargs == null) ? List.<JCExpression>nil()
+                                               : typeargs;
+            this.clazz = clazz;
+            this.args = args;
+            this.def = def;
+        }
+        @Override
+        public void accept(Visitor v) { v.visitNewProxy(this); }
+
+        public Kind getKind() { return Kind.NEW_PROXY; }
+        public JCExpression getEnclosingExpression() { // expr.new C< ... > ( ... )
+            return encl;
+        }
+        public List<JCExpression> getTypeArguments() {
+            return typeargs;
+        }
+        public JCExpression getIdentifier() { return clazz; }
+        public List<JCExpression> getArguments() {
+            return args;
+        }
+        public JCClassDecl getClassBody() { return def; }
+        @Override
+        public <R,D> R accept(TreeVisitor<R,D> v, D d) {
+            return v.visitNewProxy(this, d);
+        }
+        @Override
+        public int getTag() {
+            return NEWPROXY;
+        }
+    }
 
     /**
      * A new[...] operation.
@@ -2212,6 +2269,7 @@ public abstract class JCTree implements Tree, Cloneable, DiagnosticPosition {
         public void visitAssert(JCAssert that)               { visitTree(that); }
         public void visitApply(JCMethodInvocation that)      { visitTree(that); }
         public void visitNewClass(JCNewClass that)           { visitTree(that); }
+        public void visitNewProxy(JCNewProxy that)           { visitTree(that); }
         public void visitNewArray(JCNewArray that)           { visitTree(that); }
         public void visitParens(JCParens that)               { visitTree(that); }
         public void visitAssign(JCAssign that)               { visitTree(that); }
